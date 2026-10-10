@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spoor</title>
+<meta name="description" content="Testen voor de stadsspellen: lopen met een toestel, en live zien waar het gelopen heeft.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  /*
+   * Spoor — Sven, 10 oktober 2026: "mijn zoon wil met een van mijn toestellen
+   * blokjes lopen om te testen. dan moet ik wel kunnen volgen. kan je rap iets
+   * maken dat ik de ID's tekeningen zie? en templates zoals de routes in pokemon."
+   *
+   * Eén pagina, twee standen: #lopen (dit toestel neemt op) en #volgen (de kaart).
+   * Doorsturen via ntfy.sh op een geheim kanaal: gratis, geen account. ntfy
+   * bewaart berichten 12 uur; de kaart onthoudt daarnaast wat ze zag in de browser.
+   */
+  :root { --bg:#F6F1E7; --kaart:#FFFFFF; --inkt:#2A2118; --zacht:#7A6A55; --goud:#D9921E; --rand:#E3D7C2; --rood:#C2412D; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#17130E; --kaart:#231C14; --inkt:#F3E9D6; --zacht:#B9A88C; --goud:#F2B33D; --rand:#3A3024; --rood:#E2553E; } }
+  :root[data-theme="dark"] { --bg:#17130E; --kaart:#231C14; --inkt:#F3E9D6; --zacht:#B9A88C; --goud:#F2B33D; --rand:#3A3024; --rood:#E2553E; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--inkt); font:16px/1.4 system-ui,-apple-system,sans-serif; }
+  #kaart { position:fixed; inset:0; }
+  .paneel { position:fixed; left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto; background:var(--kaart); border:1px solid var(--rand); border-radius:18px; padding:14px 16px; box-shadow:0 8px 30px rgba(0,0,0,.25); z-index:1000; }
+  .kop { position:fixed; left:12px; right:12px; top:calc(10px + env(safe-area-inset-top)); max-width:520px; margin:0 auto; display:flex; gap:8px; z-index:1000; }
+  .tab { flex:1; padding:10px; border-radius:12px; border:1px solid var(--rand); background:var(--kaart); color:var(--inkt); font-weight:700; text-align:center; text-decoration:none; }
+  .tab.aan { background:var(--goud); color:#2A1A05; border-color:var(--goud); }
+  h1 { margin:0 0 6px; font-size:20px; }
+  p { margin:6px 0; color:var(--zacht); }
+  input { width:100%; padding:12px; font-size:17px; border-radius:12px; border:1px solid var(--rand); background:var(--bg); color:var(--inkt); }
+  button { padding:13px 16px; font-size:17px; font-weight:700; border-radius:14px; border:0; background:var(--goud); color:#2A1A05; cursor:pointer; }
+  button.stil { background:transparent; color:var(--inkt); border:1px solid var(--rand); }
+  button.rood { background:var(--rood); color:#fff; }
+  .rij { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .rij > * { flex:1; min-width:120px; }
+  .cijfers { display:flex; gap:14px; margin-top:8px; font-variant-numeric:tabular-nums; }
+  .cijfers b { display:block; font-size:22px; color:var(--inkt); }
+  .cijfers span { font-size:12px; color:var(--zacht); }
+  .lijst { margin-top:8px; display:flex; flex-direction:column; gap:6px; max-height:28vh; overflow:auto; }
+  .loper { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--rand); border-radius:12px; }
+  .stip { width:14px; height:14px; border-radius:7px; flex:none; }
+  .klein { font-size:13px; color:var(--zacht); }
+  .melding { margin-top:8px; padding:8px 10px; border-radius:10px; background:rgba(194,65,45,.12); color:var(--rood); font-size:14px; display:none; }
+</style>
+</head>
+<body>
+<div id="kaart"></div>
+<div class="kop">
+  <a class="tab" id="tabLopen" href="#lopen">Lopen</a>
+  <a class="tab" id="tabVolgen" href="#volgen">Volgen</a>
+</div>
+
+<div class="paneel" id="paneelLopen" hidden>
+  <h1>Lopen</h1>
+  <p>Geef dit toestel een naam en tik op Start. Hou het scherm aan: de pagina vraagt dat zelf.</p>
+  <input id="naam" placeholder="bv. werkmanneke_1" autocomplete="off" autocapitalize="off">
+  <div class="rij">
+    <button id="start">Start</button>
+    <button id="stop" class="rood" hidden>Stop</button>
+  </div>
+  <div class="cijfers">
+    <div><b id="afstand">0 m</b><span>gelopen</span></div>
+    <div><b id="punten">0</b><span>punten</span></div>
+    <div><b id="nauw">–</b><span>gps-nauwkeurigheid</span></div>
+    <div id="scoreVak" hidden><b id="score">–</b><span>op de route</span></div>
+  </div>
+  <div class="melding" id="meldingLopen"></div>
+</div>
+
+<div class="paneel" id="paneelVolgen" hidden>
+  <h1>Volgen</h1>
+  <p id="volgUitleg">Elke loper is een eigen kleur. De kaart werkt vanzelf bij.</p>
+  <div class="lijst" id="lopers"></div>
+  <div class="rij">
+    <button id="tekenSjabloon" class="stil">Route tekenen</button>
+    <button id="zendSjabloon" hidden>Route naar de lopers</button>
+    <button id="wisSjabloon" class="stil" hidden>Wissen</button>
+  </div>
+  <p class="klein" id="sjabloonUitleg" hidden>Tik punten op de kaart; de lopers zien deze route als stippellijn, met een score voor hoe goed ze haar volgen.</p>
+</div>
+
+<script>
+(() => {
+  /* Het kanaal staat niet in de pagina (die is publiek) maar in de link: ?k=… */
+  const KANAAL = (() => {
+    const url = new URL(location.href);
+    let k = url.searchParams.get('k') || (() => { try { return JSON.parse(localStorage.getItem('spoor-kanaal')); } catch { return null; } })();
+    if (!k || !/^[a-z0-9-]{12,64}$/.test(k)) k = 'spoor-' + [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('spoor-kanaal', JSON.stringify(k)); } catch {}
+    if (url.searchParams.get('k') !== k) { url.searchParams.set('k', k); history.replaceState(null, '', url); }
+    return k;
+  })();
+  const NTFY = 'https://ntfy.sh/';
+  const KLEUREN = ['#D9921E', '#2B7BE4', '#C2412D', '#2E9E5B', '#8E44AD', '#E67E22', '#16A085', '#D81B60'];
+  const opslag = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+
+  const kaart = L.map('kaart', { zoomControl: false }).setView([50.93, 5.34], 14);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(kaart);
+
+  /* ── de route-sjabloon (Pokémon-achtig): een stippellijn om te volgen ── */
+  let sjabloon = opslag.get('spoor-sjabloon', []);
+  const sjabloonLijn = L.polyline(sjabloon, { color: '#7A6A55', weight: 5, dashArray: '2 12', lineCap: 'round' }).addTo(kaart);
+  const zetSjabloon = (p) => { sjabloon = p; opslag.set('spoor-sjabloon', p); sjabloonLijn.setLatLngs(p); };
+  function afstand(a, b) { const R = 6371000, r = Math.PI / 180; const dLa = (b[0] - a[0]) * r, dLo = (b[1] - a[1]) * r; const h = Math.sin(dLa / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLo / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); }
+  /* Hoe ver ligt punt p van de sjabloon (in meter, benaderd)? */
+  function totSjabloon(p) {
+    let best = Infinity;
+    for (let i = 0; i < sjabloon.length - 1; i++) {
+      const a = sjabloon[i], b = sjabloon[i + 1];
+      for (let k = 0; k <= 10; k++) { const q = [a[0] + (b[0] - a[0]) * k / 10, a[1] + (b[1] - a[1]) * k / 10]; best = Math.min(best, afstand(p, q)); }
+    }
+    return best;
+  }
+
+  async function zend(bericht) {
+    const r = await fetch(NTFY + KANAAL, { method: 'POST', body: JSON.stringify(bericht) });
+    if (!r.ok) throw new Error('ntfy ' + r.status);
+  }
+
+  /* ── LOPEN ─────────────────────────────────────────────────────────── */
+  let wacht = null, wakker = null, buffer = [], spoorLijn = null, totaal = 0, laatste = null, aantal = 0, opDeRoute = 0;
+  const naamVeld = document.getElementById('naam');
+  naamVeld.value = opslag.get('spoor-naam', '');
+  const meldLopen = (t) => { const m = document.getElementById('meldingLopen'); m.textContent = t; m.style.display = t ? 'block' : 'none'; };
+
+  async function houWakker() { try { if ('wakeLock' in navigator) wakker = await navigator.wakeLock.request('screen'); } catch {} }
+  document.addEventListener('visibilitychange', () => { if (wacht !== null && document.visibilityState === 'visible') houWakker(); });
+
+  function start() {
+    const naam = naamVeld.value.trim().replace(/\s+/g, '_');
+    if (!naam) { meldLopen('Geef dit toestel eerst een naam.'); return; }
+    if (!('geolocation' in navigator)) { meldLopen('Dit toestel geeft geen locatie door.'); return; }
+    opslag.set('spoor-naam', naam);
+    meldLopen('');
+    houWakker();
+    spoorLijn = spoorLijn || L.polyline([], { color: '#D9921E', weight: 6 }).addTo(kaart);
+    wacht = navigator.geolocation.watchPosition((pos) => {
+      const p = [pos.coords.latitude, pos.coords.longitude];
+      document.getElementById('nauw').textContent = Math.round(pos.coords.accuracy) + ' m';
+      if (pos.coords.accuracy > 40) return; /* te onnauwkeurig: niet tekenen */
+      if (laatste && afstand(laatste, p) < 4) return; /* stilstaan telt niet */
+      if (laatste) totaal += afstand(laatste, p);
+      laatste = p; aantal++;
+      spoorLijn.addLatLng(p);
+      if (aantal === 1) kaart.setView(p, 17);
+      else kaart.panTo(p);
+      buffer.push([+p[0].toFixed(6), +p[1].toFixed(6), Date.now()]);
+      if (sjabloon.length > 1) { if (totSjabloon(p) < 20) opDeRoute++; document.getElementById('score').textContent = Math.round(100 * opDeRoute / aantal) + ' %'; }
+      document.getElementById('afstand').textContent = totaal < 1000 ? Math.round(totaal) + ' m' : (totaal / 1000).toFixed(2) + ' km';
+      document.getElementById('punten').textContent = aantal;
+    }, (fout) => {
+      meldLopen(fout.code === 1 ? 'Locatie geweigerd. Zet locatie aan voor deze pagina in de instellingen van de browser.' : 'Geen gps-signaal: ' + fout.message);
+    }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+    document.getElementById('start').hidden = true;
+    document.getElementById('stop').hidden = false;
+  }
+  function stop() {
+    if (wacht !== null) navigator.geolocation.clearWatch(wacht);
+    wacht = null;
+    try { wakker && wakker.release(); } catch {}
+    verstuur();
+    document.getElementById('start').hidden = false;
+    document.getElementById('stop').hidden = true;
+  }
+  /* Elke 15 seconden een pakje punten: zuinig met de batterij en met ntfy. */
+  async function verstuur() {
+    if (buffer.length === 0) return;
+    const pakje = buffer; buffer = [];
+    try { await zend({ t: 'spoor', naam: opslag.get('spoor-naam', '?'), p: pakje }); meldLopen(''); }
+    catch { buffer = pakje.concat(buffer); meldLopen('Geen verbinding: de punten worden bewaard en straks verstuurd.'); }
+  }
+  setInterval(() => { if (wacht !== null) verstuur(); }, 15000);
+  document.getElementById('start').onclick = start;
+  document.getElementById('stop').onclick = stop;
+
+  /* ── VOLGEN ────────────────────────────────────────────────────────── */
+  const lopers = opslag.get('spoor-lopers', {}); /* naam → [[lat,lon,t], …] */
+  const lijnen = {}, merkers = {};
+  function kleurVan(naam) { const namen = Object.keys(lopers).sort(); return KLEUREN[namen.indexOf(naam) % KLEUREN.length]; }
+  function tekenLoper(naam) {
+    const pts = lopers[naam]; if (!pts || !pts.length) return;
+    const ll = pts.map((q) => [q[0], q[1]]);
+    if (!lijnen[naam]) lijnen[naam] = L.polyline([], { color: kleurVan(naam), weight: 6, opacity: 0.9 }).addTo(kaart);
+    lijnen[naam].setStyle({ color: kleurVan(naam) }).setLatLngs(ll);
+    const laatst = ll[ll.length - 1];
+    if (!merkers[naam]) merkers[naam] = L.circleMarker(laatst, { radius: 9, weight: 3, color: '#fff', fillOpacity: 1 }).addTo(kaart).bindTooltip(naam, { permanent: true, direction: 'top', offset: [0, -8] });
+    merkers[naam].setLatLng(laatst).setStyle({ fillColor: kleurVan(naam) });
+  }
+  function lijstBij() {
+    const box = document.getElementById('lopers'); box.innerHTML = '';
+    const namen = Object.keys(lopers).sort();
+    if (namen.length === 0) { box.innerHTML = '<p class="klein">Nog niemand onderweg. Open deze pagina op het toestel van de loper, kies Lopen en tik Start.</p>'; return; }
+    for (const n of namen) {
+      const pts = lopers[n]; let m = 0; for (let i = 1; i < pts.length; i++) m += afstand(pts[i - 1], pts[i]);
+      const min = Math.round((Date.now() - pts[pts.length - 1][2]) / 60000);
+      const d = document.createElement('button'); d.className = 'loper stil';
+      d.innerHTML = '<span class="stip"></span><span style="flex:1;text-align:left"><b></b><br><span class="klein"></span></span>';
+      d.querySelector('.stip').style.background = kleurVan(n);
+      d.querySelector('b').textContent = n;
+      d.querySelector('.klein').textContent = (m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km') + ' · ' + (min < 1 ? 'nu' : min + ' min geleden');
+      d.onclick = () => lijnen[n] && kaart.fitBounds(lijnen[n].getBounds(), { padding: [40, 40] });
+      box.appendChild(d);
+    }
+  }
+  function verwerk(msg) {
+    let d; try { d = JSON.parse(msg.message); } catch { return; }
+    if (d.t === 'spoor' && d.naam && Array.isArray(d.p)) {
+      const al = lopers[d.naam] || (lopers[d.naam] = []);
+      const laatsteT = al.length ? al[al.length - 1][2] : 0;
+      for (const q of d.p) if (q[2] > laatsteT) al.push(q);
+      opslag.set('spoor-lopers', lopers);
+      tekenLoper(d.naam); lijstBij();
+    }
+    if (d.t === 'sjabloon' && Array.isArray(d.p)) zetSjabloon(d.p);
+  }
+  let volgt = false;
+  async function volg() {
+    if (volgt) return; volgt = true;
+    Object.keys(lopers).forEach(tekenLoper); lijstBij();
+    /* Eerst wat ntfy nog heeft (12 uur), dan live. */
+    try {
+      const r = await fetch(NTFY + KANAAL + '/json?poll=1&since=12h');
+      const t = await r.text();
+      t.split('\n').filter(Boolean).forEach((l) => { try { const m = JSON.parse(l); if (m.event === 'message') verwerk(m); } catch {} });
+    } catch {}
+    const namen = Object.keys(lopers);
+    if (namen.length) { const g = L.featureGroup(namen.map((n) => lijnen[n]).filter(Boolean)); if (g.getLayers().length) kaart.fitBounds(g.getBounds(), { padding: [40, 40] }); }
+    const bron = new EventSource(NTFY + KANAAL + '/sse');
+    bron.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.event === 'message') verwerk(m); } catch {} };
+    setInterval(lijstBij, 30000);
+  }
+
+  /* Een route tekenen voor de lopers. */
+  let tekent = false, nieuw = [];
+  const tekenKnop = document.getElementById('tekenSjabloon');
+  tekenKnop.onclick = () => {
+    tekent = !tekent; nieuw = []; tekenKnop.textContent = tekent ? 'Klaar met tekenen' : 'Route tekenen';
+    document.getElementById('sjabloonUitleg').hidden = !tekent;
+    document.getElementById('zendSjabloon').hidden = !tekent;
+    document.getElementById('wisSjabloon').hidden = !tekent;
+  };
+  kaart.on('click', (e) => { if (!tekent) return; nieuw.push([+e.latlng.lat.toFixed(6), +e.latlng.lng.toFixed(6)]); zetSjabloon(nieuw.slice()); });
+  document.getElementById('wisSjabloon').onclick = () => { nieuw = []; zetSjabloon([]); };
+  document.getElementById('zendSjabloon').onclick = async () => {
+    try { await zend({ t: 'sjabloon', p: sjabloon }); tekenKnop.click(); } catch { alert('Versturen lukte niet. Probeer opnieuw.'); }
+  };
+
+  /* Ook de loper hoort een nieuwe route meteen. */
+  async function luisterSjabloon() {
+    try { const r = await fetch(NTFY + KANAAL + '/json?poll=1&since=12h'); (await r.text()).split('\n').filter(Boolean).forEach((l) => { try { const m = JSON.parse(l); const d = JSON.parse(m.message); if (d.t === 'sjabloon') zetSjabloon(d.p); } catch {} }); } catch {}
+    const bron = new EventSource(NTFY + KANAAL + '/sse');
+    bron.onmessage = (e) => { try { const m = JSON.parse(e.data); const d = JSON.parse(m.message); if (d.t === 'sjabloon') { zetSjabloon(d.p); document.getElementById('scoreVak').hidden = d.p.length < 2; } } catch {} };
+    document.getElementById('scoreVak').hidden = sjabloon.length < 2;
+  }
+
+  function stand() {
+    const lopen = location.hash !== '#volgen';
+    document.getElementById('paneelLopen').hidden = !lopen;
+    document.getElementById('paneelVolgen').hidden = lopen;
+    document.getElementById('tabLopen').classList.toggle('aan', lopen);
+    document.getElementById('tabVolgen').classList.toggle('aan', !lopen);
+    if (lopen) luisterSjabloon(); else volg();
+  }
+  window.addEventListener('hashchange', stand);
+  if (!location.hash) location.hash = opslag.get('spoor-naam', '') ? '#lopen' : '#volgen';
+  stand();
+})();
+</script>
+</body>
+</html>
